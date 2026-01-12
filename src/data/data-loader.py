@@ -17,6 +17,8 @@ Summarize key findings and observations in your report
 Highlight patterns that may influence modeling choices
 """
 
+# TODO do not remove ´` ' when removing punctuation
+
 import pandas as pd
 from collections import Counter
 import re
@@ -30,36 +32,35 @@ class IMDBDataLoader:
         self.file_path = file_path
         self.sample_size = sample_size
         self.data = None
+        self.stats = None
 
-        # Download stopwords once at init
         nltk.download("stopwords", quiet=True)
-        self.stop_words = set(stopwords.words("english"))
+        self.stop_words = set(stopwords.words("english")) # words with no or very little meaning
+        self._extract_words = nltk.RegexpTokenizer(r"\w+").tokenize # practically word tokenizer, but this will be used in stats only actual tokenization will be subword
 
     def _remove_stopwords(self, text: str) -> str:
-        """Remove stopwords from a given text."""
-        words = text.split()
+        words = self._extract_words(text)
         return " ".join(w for w in words if w.lower() not in self.stop_words)
 
     def load_data(self, remove_stopwords=False) -> pd.DataFrame:
-        """Load the IMDB dataset from a CSV file."""
         print(
             f"Loading data from {self.file_path} with sample size {self.sample_size}..."
         )
         dataframe = pd.read_csv(self.file_path)
         if self.sample_size and self.sample_size < len(dataframe):
-            dataframe = dataframe.sample(
-                n=self.sample_size, random_state=42
-            ).reset_index(drop=True)
-        self.data = dataframe
-        print(f"Data loaded with shape: {self.data.shape}")
+            dataframe = dataframe.sample(n=self.sample_size, random_state=42).reset_index(drop=True)
 
-        # remove br tags from reviews
-        self.data["review"] = self.data["review"].apply(
-            lambda x: re.sub(r"<br\s*/?>", " ", x)
-        )
+        dataframe["review"] = dataframe["review"].str.replace(r"<br\s*/?>", " ", regex=True)
         if remove_stopwords:
             print("Removing stopwords from reviews...")
-            self.data["review"] = self.data["review"].apply(self._remove_stopwords)
+            dataframe["review"] = dataframe["review"].apply(self._remove_stopwords)
+
+        self.data = dataframe
+
+        # save tokens/words into new column , lowercased
+        self.data["_words"] = self.data["review"].str.lower().apply(self._extract_words)
+
+        print("Data loaded with shape:", self.data.shape)
         return self.data
 
     def get_stats(self) -> dict:
@@ -67,128 +68,101 @@ class IMDBDataLoader:
         if self.data is None:
             raise ValueError("Data not loaded. Please call load_data() first.")
 
+        self.stats = {}
+
         # Precompute lengths to avoid repeated calculations
-        self.data["_char_len"] = self.data["review"].apply(len)
-        self.data["_word_count"] = self.data["review"].apply(lambda x: len(x.split()))
+        self.data["_char_len"] = self.data["review"].str.len()
+        self.data["_word_count"] = self.data["_words"].apply(len)
 
-        def most_frequent_words(texts, n=5):
-            words = re.findall(r"\b\w+\b", " ".join(texts).lower())
-            return dict(Counter(words).most_common(n))
+        # should have two lists, one per sentiment
+        # dictionary: sentiment -> single flattened list of all words with that sentiment
+        all_words_per_sentiment = {}
+        for sentiment in ["positive", "negative"]:
+            word_lists = self.data[self.data["sentiment"] == sentiment]["_words"].tolist()
+            # Flatten the list of lists into a single list
+            flat_words = []
+            for word_list in word_lists:
+                flat_words.extend(word_list)
+            all_words_per_sentiment[sentiment] = flat_words
 
-        # Compute n-grams per review to avoid cross-boundary artifacts
-        def ngram_frequencies(texts, n=2):
-            ngram_counts = Counter()
-            for text in texts:
-                words = re.findall(r"\b\w+\b", text.lower())
-                ngrams = [" ".join(words[i : i + n]) for i in range(len(words) - n + 1)]
-                ngram_counts.update(ngrams)
-            return dict(ngram_counts.most_common(10))
+        # Overall: combine all words from both sentiments
+        all_words_per_sentiment["overall"] = []
+        for word_list in self.data["_words"].tolist():
+            all_words_per_sentiment["overall"].extend(word_list)
 
-        def significant_words_per_class(n=5):
-            """
-            Find words that are significantly more frequent in one class vs others.
-            Uses log-odds ratio to measure significance.
-            """
-            class_word_counts, class_totals = {}, {}
-            for label, group in self.data.groupby("sentiment"):
-                words = re.findall(r"\b\w+\b", " ".join(group["review"]).lower())
-                class_word_counts[label] = Counter(words)
-                class_totals[label] = sum(class_word_counts[label].values())
-
-            result = {}
-            labels = list(class_word_counts.keys())
-            for label in labels:
-                other = [l for l in labels if l != label][0]
-                scores = {}
-                for word, count in class_word_counts[label].items():
-                    if count < 10:  # Only consider words appearing at least 10 times
-                        continue
-                    other_count = class_word_counts[other].get(word, 0)
-                    # Log-odds ratio with smoothing
-                    p1 = (count + 1) / (class_totals[label] + 1)
-                    p2 = (other_count + 1) / (class_totals[other] + 1)
-                    scores[word] = math.log(p1 / p2)
-                # Get top N words with highest log-odds
-                result[label] = {
-                    w: round(s, 3)
-                    for w, s in sorted(
-                        scores.items(), key=lambda x: x[1], reverse=True
-                    )[:n]
-                }
-            return result
-
-        def vocabulary_size(texts, n=1):
-            print(f"Calculating {n}-gram vocabulary size...")
-            ngram_set = set()
-            for text in texts:
-                words = re.findall(r"\b\w+\b", text.lower())
-                ngrams = [" ".join(words[i : i + n]) for i in range(len(words) - n + 1)]
-                ngram_set.update(ngrams)
-            return len(ngram_set)
-
-        stats = {
-            "num_rows": len(self.data),
-            "num_columns": len(self.data.columns),
-            "columns": [c for c in self.data.columns if not c.startswith("_")],
-            "class_distribution": self.data["sentiment"].value_counts().to_dict(),
-            "average_text_length": {  # chars
-                "overall": self.data["_char_len"].mean(),
-                "per_class": self.data.groupby("sentiment")["_char_len"]
-                .mean()
-                .to_dict(),
-            },
-            "average_word_count": {  # words
-                "overall": self.data["_word_count"].mean(),
-                "per_class": self.data.groupby("sentiment")["_word_count"]
-                .mean()
-                .to_dict(),
-            },
-            "median_text_length": {
-                "overall": self.data["_char_len"].median(),
-                "per_class": self.data.groupby("sentiment")["_char_len"]
-                .median()
-                .to_dict(),
-            },
-            "median_word_count": {
-                "overall": self.data["_word_count"].median(),
-                "per_class": self.data.groupby("sentiment")["_word_count"]
-                .median()
-                .to_dict(),
-            },
-            "most_frequent_words": {
-                "overall": most_frequent_words(self.data["review"]),
-                "per_class": self.data.groupby("sentiment")["review"]
-                .apply(most_frequent_words)
-                .to_dict(),
-            },
-            "ngram_frequencies": {
-                "overall": {
-                    "bigrams": ngram_frequencies(self.data["review"], 2),
-                    "trigrams": ngram_frequencies(self.data["review"], 3),
-                },
-                "per_class": {
-                    s: {
-                        "bigrams": ngram_frequencies(g["review"], 2),
-                        "trigrams": ngram_frequencies(g["review"], 3),
-                    }
-                    for s, g in self.data.groupby("sentiment")
-                },
-            },
-            "significant_words_per_class": significant_words_per_class(),
-            "vocabulary_size": {
-                "overall": {
-                    f"{n}-grams": vocabulary_size(self.data["review"], n)
-                    for n in [1, 2, 3]
-                },
-                "per_class": {
-                    s: {
-                        f"{n}-grams": vocabulary_size(g["review"], n) for n in [1, 2, 3]
-                    }
-                    for s, g in self.data.groupby("sentiment")
-                },
-            },
+        self.stats["average_text_length"] = {
+            "overall": self.data["_char_len"].mean(),
+            "positive": self.data[self.data["sentiment"] == "positive"]["_char_len"].mean(),
+            "negative": self.data[self.data["sentiment"] == "negative"]["_char_len"].mean(),    
         }
-        return stats
+
+        self.stats["median_text_length"] = {
+            "overall": self.data["_char_len"].median(),
+            "positive": self.data[self.data["sentiment"] == "positive"]["_char_len"].median(),
+            "negative": self.data[self.data["sentiment"] == "negative"]["_char_len"].median(),
+        }
+
+        self.stats["average_word_count"] = {
+            "overall": self.data["_word_count"].mean(),
+            "positive": self.data[self.data["sentiment"] == "positive"]["_word_count"].mean(),
+            "negative": self.data[self.data["sentiment"] == "negative"]["_word_count"].mean(),
+        }
+
+        self.stats["median_word_count"] = {
+            "overall": self.data["_word_count"].median(),
+            "positive": self.data[self.data["sentiment"] == "positive"]["_word_count"].median(),
+            "negative": self.data[self.data["sentiment"] == "negative"]["_word_count"].median(),
+        }
+
+        def vocabulary_size(sentiment: str) -> int:
+            return len(set(all_words_per_sentiment[sentiment]))
+
+        self.stats["vocabulary_size"] = {
+            sentiment: vocabulary_size(sentiment) for sentiment in ["overall", "positive", "negative"]
+        }
+
+        self.stats["most_frequent_words"] = {
+            sentiment: Counter(all_words_per_sentiment[sentiment]).most_common(10) for sentiment in ["overall", "positive", "negative"]
+        }
+
+        def ngram_frequency(sentiment: str, n: int) -> list:
+            return Counter(nltk.ngrams(all_words_per_sentiment[sentiment], n)).most_common(10)
+
+        self.stats["2_gram_frequency"] = {
+            sentiment: ngram_frequency(sentiment, 2) for sentiment in ["overall", "positive", "negative"]
+        }
+
+        self.stats["3_gram_frequency"] = {
+            sentiment: ngram_frequency(sentiment, 3) for sentiment in ["overall", "positive", "negative"]
+        }
+
+
+        def log_odds_ratio(pos_counts: Counter, neg_counts: Counter, alpha: float = 1.0):
+            """Returns dict of word -> log-odds ratio (positive vs negative)."""
+            vocab = set(pos_counts.keys()) | set(neg_counts.keys())
+            pos_total = sum(pos_counts.values()) + alpha * len(vocab)
+            neg_total = sum(neg_counts.values()) + alpha * len(vocab)
+            
+            scores = {}
+            for word in vocab:
+                pos_odds = (pos_counts[word] + alpha) / pos_total
+                neg_odds = (neg_counts[word] + alpha) / neg_total
+                scores[word] = math.log(pos_odds / neg_odds)
+            return scores
+
+        # Usage:
+        pos_counts = Counter(all_words_per_sentiment["positive"])
+        neg_counts = Counter(all_words_per_sentiment["negative"])
+        scores = log_odds_ratio(pos_counts, neg_counts)
+
+        # Most positive words
+        self.stats["most_positive_words"] = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:10]
+        # Most negative words
+        self.stats["most_negative_words"] = sorted(scores.items(), key=lambda x: x[1])[:10]
+
+        
+
+        return self.stats
 
     def visualize_word_clouds(self):
         """Visualize word clouds per class."""
@@ -250,4 +224,4 @@ if __name__ == "__main__":
     import pprint
 
     pprint.pprint(stats)
-    loader.visualize_all()
+    #loader.visualize_all()
