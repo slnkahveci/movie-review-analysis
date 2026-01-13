@@ -466,83 +466,63 @@ class IMDBDataset(Dataset):
                 - "label": int - sentiment label (0=negative, 1=positive)
         """
         tokens = self.tokens_list[idx].copy()
-        
+
         if self.start_token:
             tokens = [self.start_token] + tokens
         if self.end_token:
             tokens = tokens + [self.end_token]
-        
+
         # Convert tokens to IDs
         token_ids = [self.vocab.get(token, self.unk_id) for token in tokens]
-        
+
         return {
             "token_ids": token_ids,
             "label": self.labels[idx],
         }
 
 
-def collate_fn_for_lm(batch, padding_idx: int = 0, max_seq_length: Optional[int] = None):
-    """
-    Collate function for next token prediction (language modeling).
-    Pads sequences and creates input/target pairs where target is shifted by 1.
-    Memory-optimized version that truncates long sequences.
-    
-    Args:
-        batch: List of dicts with "token_ids" and "label" keys
-        padding_idx: Index to use for padding
-        max_seq_length: Maximum sequence length (truncates longer sequences)
-        
-    Returns:
-        dict with:
-            - "input_ids": torch.Tensor (batch_size, max_seq_len)
-            - "target_ids": torch.Tensor (batch_size, max_seq_len)
-            - "label": torch.Tensor (batch_size,)
-    """
+def collate_fn_for_lm(
+    batch, padding_idx: int = 0, max_seq_length: Optional[int] = None
+):
     token_ids_list = [item["token_ids"] for item in batch]
     labels = [item["label"] for item in batch]
-    
-    # Truncate sequences if max_seq_length is specified
+
+    # Truncate BUT preserve end token
     if max_seq_length is not None:
-        token_ids_list = [seq[:max_seq_length] for seq in token_ids_list]
-    
-    # Find max length in batch (after truncation)
-    max_len = max(len(seq) for seq in token_ids_list) if token_ids_list else 0
-    
-    if max_len == 0:
-        # Empty batch
-        return {
-            "input_ids": torch.empty((0, 0), dtype=torch.long),
-            "target_ids": torch.empty((0, 0), dtype=torch.long),
-            "label": torch.empty((0,), dtype=torch.long),
-        }
-    
-    batch_size = len(token_ids_list)
-    
-    # Pre-allocate tensors for efficiency
-    input_ids = torch.full((batch_size, max_len), padding_idx, dtype=torch.long)
-    target_ids = torch.full((batch_size, max_len), padding_idx, dtype=torch.long)
-    
-    # Fill tensors directly (more memory efficient than list appending)
-    for i, token_ids in enumerate(token_ids_list):
-        seq_len = len(token_ids)
-        if seq_len > 1:
-            # For next token prediction: input = [t0, t1, ..., tN-2], target = [t1, t2, ..., tN-1]
-            # Copy sequences into pre-allocated tensors directly
-            input_len = min(seq_len - 1, max_len)
-            target_len = min(seq_len - 1, max_len)
-            
-            # Use direct assignment from list slices (more efficient)
-            if input_len > 0:
-                input_ids[i, :input_len] = torch.tensor(token_ids[:-1][:input_len], dtype=torch.long)
-            if target_len > 0:
-                target_ids[i, :target_len] = torch.tensor(token_ids[1:][:target_len], dtype=torch.long)
-    
-    labels_tensor = torch.tensor(labels, dtype=torch.long)
-    
+        truncated = []
+        for seq in token_ids_list:
+            if len(seq) > max_seq_length:
+                # Keep first (max_seq_length-1) tokens + last token (</s>)
+                truncated.append(seq[: max_seq_length - 1] + [seq[-1]])
+            else:
+                truncated.append(seq)
+        token_ids_list = truncated
+
+    # Build input/target pairs as lists first
+    inputs = []
+    targets = []
+    for seq in token_ids_list:
+        if len(seq) > 1:
+            inputs.append(seq[:-1])
+            targets.append(seq[1:])
+        else:
+            inputs.append([padding_idx])
+            targets.append([padding_idx])
+
+    # Pad all sequences at once (much faster)
+    max_len = max(len(s) for s in inputs)
+
+    input_ids = torch.full((len(inputs), max_len), padding_idx, dtype=torch.long)
+    target_ids = torch.full((len(targets), max_len), padding_idx, dtype=torch.long)
+
+    for i, (inp, tgt) in enumerate(zip(inputs, targets)):
+        input_ids[i, : len(inp)] = torch.tensor(inp, dtype=torch.long)
+        target_ids[i, : len(tgt)] = torch.tensor(tgt, dtype=torch.long)
+
     return {
         "input_ids": input_ids,
         "target_ids": target_ids,
-        "label": labels_tensor,
+        "label": torch.tensor(labels, dtype=torch.long),
     }
 
 
@@ -566,7 +546,7 @@ class IMDBDataModule:
         self.vocab: Optional[dict[str, int]] = None
         self.padding_idx = 0
 
-    def build_vocab(self, tokens_list: list[list[str]], min_freq: int = 1):
+    def build_vocab(self, tokens_list: list[list[str]], min_freq: int = 10):
         """
         Build vocabulary from token sequences.
         
