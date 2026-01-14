@@ -10,7 +10,8 @@ import torch.nn.functional as F
 import tqdm
 
 
-from src.data.dataloader import TextPreprocessor, IMDBDataModule, IMDBDataStats
+from src.data.dataloader import TextPreprocessor, IMDBDataModule
+from src.data.stats import IMDBDataStats
 padding_idx = 0
 unk_token_id = 1  
 start_token_id = 2
@@ -20,10 +21,20 @@ end_token_id = 3
 # TODO: check IMDBDataset and token id mappings
 
 
+def get_device():
+    """Detect and return the best available device."""
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        return "mps"
+    else:
+        return "cpu"
+
+
 class RNN(nn.Module):
     def __init__(self, vocab_size: int, embedding_dim: int, hidden_dim: int, rnn_type: str = 'LSTM', device=None):
         super(RNN, self).__init__()
-        self.device = device if device is not None else "mps"
+        self.device = device if device is not None else get_device()
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=padding_idx)
         if rnn_type == 'LSTM':
             self.rnn = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
@@ -159,29 +170,25 @@ class RNN(nn.Module):
 
 
 if __name__ == "__main__":    # Example usage
-    device = "mps" 
+    device = get_device()
     print(f"Using device: {device}")
-
-    preprocessor = TextPreprocessor("dataset/imdb-dataset.csv", sample_size=50000)
+    tokenization = "word"  # or "bpe", "wordpiece"
+    preprocessor = TextPreprocessor("dataset/imdb-dataset.csv", sample_size=1000)
     df = preprocessor.load_data(remove_stopwords=False)
 
     data_module = IMDBDataModule()
-    data_module.build_vocab(df["_tokens"].tolist())
-
-    """
-    stats = IMDBDataStats(df).get_simple_stats()
-    print("Data stats:", stats)
-    avg_word_count = stats["average_word_count"]["overall"]
-    """
+    token_column = df["_words"] if tokenization == "word" else df[f"_tokens"]
+    data_module.build_vocab(token_column, min_freq=5)
 
     # Use smaller batch size and limit sequence length to prevent memory issues
-    train_loader = data_module.get_torch_dataloader(
+    train_loader = data_module.get_dataloader(
         df=df,
         batch_size=8,
         shuffle=True,
         max_seq_length=128,
         start_token="<s>",
         end_token="</s>",
+        device=device,
     )
 
     vocab_size = len(data_module.vocab)

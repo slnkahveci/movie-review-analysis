@@ -22,6 +22,7 @@ nltk.download("punkt_tab", quiet=True)
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from src.data.stats import IMDBDataStats
 
 # Shared mapping from sentiment string to numeric id
 SENTIMENT_TO_ID = {"negative": 0, "positive": 1}
@@ -29,34 +30,63 @@ SENTIMENT_TO_ID = {"negative": 0, "positive": 1}
 
 # ==================== Part 1: Preprocessing and Persistence ====================
 
+
 class TextPreprocessor:
     """
     Handles data loading, preprocessing, and persistence for IMDB dataset.
-    
+
     Usage:
         preprocessor = TextPreprocessor("dataset/imdb-dataset.csv")
         df = preprocessor.load_data(remove_stopwords=True)
         train_df, val_df, test_df = preprocessor.get_splits()
         preprocessor.save("processed_data")
+
+    Note: For IMDBDataStats, use tokenizer_type="word" (default) to get the "_words" column.
     """
 
     def __init__(
-        self, file_path: str, sample_size: Optional[int] = 50000, random_state: int = 42, tokenizer_type: Literal["word", "bpe", "wordpiece"] = "word"
+        self,
+        file_path: str,
+        sample_size: Optional[int] = 50000,
+        random_state: int = 42,
+        tokenizer_type: Literal["word", "bpe", "wordpiece", "unigram"] = "word",
+        tokenizer=None,
     ):
         self.file_path = Path(file_path)
         self.sample_size = sample_size
         self.random_state = random_state
+        self.tokenizer_type = tokenizer_type
+        self.tokenizer = tokenizer
 
         self.data: Optional[pd.DataFrame] = None
 
         self.stop_words = set(stopwords.words("english"))
-        self._tokenizer = (
-            functools.partial(nltk.word_tokenize, language="english")
-            if tokenizer_type == "word"
-            else None
-        )
+        if tokenizer_type == "word":
+            self._tokenizer: Callable[[str], list[str]] = nltk.word_tokenize
+        elif tokenizer_type == "bpe":
+            self._tokenizer = RegexpTokenizer(r"\w+|[^\w\s]").tokenize
+        elif tokenizer_type == "wordpiece":
+            from transformers import AutoTokenizer
 
-    def _preprocess_text(self, df: pd.DataFrame, remove_stopwords: bool = False, stemming: Literal["none", "stemming", "lemmatization"] = "none") -> pd.DataFrame:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                "bert-base-uncased"
+            ).tokenize
+        elif tokenizer_type == "unigram":
+            if tokenizer is None:
+                raise ValueError(
+                    "For 'unigram' tokenizer_type, a tokenizer instance must be provided."
+                )
+            self._tokenizer = tokenizer.tokenize
+
+        else:
+            raise ValueError(f"Unsupported tokenizer_type: {tokenizer_type}")
+
+    def _preprocess_text(
+        self,
+        df: pd.DataFrame,
+        remove_stopwords: bool = False,
+        stemming: Literal["none", "stemming", "lemmatization"] = "none",
+    ) -> pd.Series:
         """Basic text preprocessing: lowercasing and removing punctuation."""
         text_column = df["review"]
         # Clean HTML tags
@@ -70,11 +100,16 @@ class TextPreprocessor:
         # Remove stopwords
         if remove_stopwords:
             text_column = text_column.apply(
-                lambda x: " ".join([word for word in x.split() if word not in self.stop_words])
+                lambda x: " ".join(
+                    [word for word in x.split() if word not in self.stop_words]
+                )
             )
 
-        # Remove punctuation and numbers
-        text_column = text_column.str.replace(r"[^\w\s!?]", "", regex=True) 
+        if self.tokenizer_type == "word":
+            # Remove punctuation and numbers for word-based tokenization
+            text_column = text_column.str.replace(r"[^\w\s]", "", regex=True)
+        
+        # stripping punctuation for other tokenizers might be harmful, so we skip it
 
         # Lemmatization and Stemming
         if stemming == "lemmatization":
@@ -92,7 +127,9 @@ class TextPreprocessor:
     def _tokenize_words(self, text: str) -> list[str]:
         return self._tokenizer(text)
 
-    def load_data(self, remove_stopwords: bool = False) -> pd.DataFrame:
+    def load_data(
+        self, remove_stopwords: bool = False, max_length: int = 512
+    ) -> pd.DataFrame:
         # Load and preprocess the IMDB dataset.
 
         print(f"Loading data from {self.file_path}...")
@@ -104,11 +141,26 @@ class TextPreprocessor:
             df = df.reset_index(drop=True)
 
         df["review"] = self._preprocess_text(df, remove_stopwords)
-        df["_tokens"] = df["review"].apply(self._tokenize_words)
+
+        # If tokenizer is provided and tokenizer_type is bpe, wordpiece, or unigram, encode texts
+        if self.tokenizer and self.tokenizer_type in ["bpe", "wordpiece", "unigram"]:
+            # Use truncation only, no padding (dynamic padding in DataLoader is much faster)
+            encodings = self.tokenizer(
+                df["review"].tolist(),
+                truncation=True,
+                padding=False,  # Dynamic padding per batch is much faster than padding all to max_length
+                max_length=max_length,
+            )
+            df["_input_ids"] = encodings["input_ids"]
+            df["_attention_mask"] = encodings["attention_mask"]
+            df["_word_count"] = df["_input_ids"].apply(len)
+        else:
+            # Word-based tokenization saves to _words column
+            df["_words"] = df["review"].apply(self._tokenize_words)
+            df["_word_count"] = df["_words"].apply(len)
 
         # Length features
         df["_char_len"] = df["review"].str.len()
-        df["_word_count"] = df["_tokens"].apply(len)
 
         self.data = df
 
@@ -161,7 +213,9 @@ class TextPreprocessor:
             random_state=self.random_state,
         )
 
-        print( f"Split sizes - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+        print(
+            f"Split sizes - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}"
+        )
 
         # reset indices and don't save old indices
         return (
@@ -187,7 +241,8 @@ class TextPreprocessor:
         save_df = self.data[save_cols].copy()
 
         # Store tokens as strings (HF doesn't like nested lists well)
-        save_df["_tokens_str"] = self.data["_tokens"].apply(" ".join)
+        if "_words" in self.data.columns:
+            save_df["_words_str"] = self.data["_words"].apply(" ".join)
 
         Dataset.from_pandas(save_df).save_to_disk(path)
         print(f"Saved to {path}")
@@ -198,9 +253,10 @@ class TextPreprocessor:
 
         df = load_from_disk(path).to_pandas()
 
-        # Reconstruct tokens
-        df["_tokens"] = df["_tokens_str"].str.split()
-        df = df.drop(columns=["_tokens_str"])
+        # Reconstruct tokens if word-based
+        if "_words_str" in df.columns:
+            df["_words"] = df["_words_str"].str.split()
+            df = df.drop(columns=["_words_str"])
 
         self.data = df
 
@@ -208,283 +264,53 @@ class TextPreprocessor:
         return df
 
 
-# ==================== Part 2: Statistics ====================
-
-class IMDBDataStats:
-    """
-    Computes statistics and visualizations for IMDB dataset.
-    
-    Usage:
-        preprocessor = IMDBDataPreprocessor("dataset/imdb-dataset.csv")
-        df = preprocessor.load_data()
-        
-        stats_computer = IMDBDataStats(df)
-        stats = stats_computer.get_stats()
-        stats_computer.visualize_word_clouds()
-    """
-
-    def __init__(self, data: pd.DataFrame):
-        """
-        Initialize with a preprocessed DataFrame.
-        
-        Args:
-            data: DataFrame from IMDBDataPreprocessor.load_data()
-        """
-        if data is None or "_tokens" not in data.columns:
-            raise ValueError(
-                "Data must be a DataFrame with '_tokens' column. Use IMDBDataPreprocessor.load_data() first."
-            )
-        self.data = data
-        self._word_counters: Optional[dict[str, Counter]] = None
-        self.corpus = None  # scattertext corpus (lazy)
-        self.stats: Optional[dict] = None
-
-    def _get_word_counters(self) -> dict[str, Counter]:
-        """Get word frequency counters per sentiment (cached)."""
-        if self._word_counters is not None:
-            return self._word_counters
-
-        self._word_counters = {}
-        for sentiment in ["positive", "negative"]:
-            mask = self.data["sentiment"] == sentiment
-            tokens = self.data.loc[mask, "_tokens"].explode()
-            self._word_counters[sentiment] = Counter(tokens.dropna())
-
-        all_tokens = self.data["_tokens"].explode()
-        self._word_counters["overall"] = Counter(all_tokens.dropna())
-
-        return self._word_counters
-
-    def _build_corpus(self):
-        """Build scattertext corpus (lazy)."""
-        if self.corpus is not None:
-            return self.corpus
-
-        import scattertext as st
-
-        print("Building scattertext corpus...")
-        self.corpus = st.CorpusFromPandas(
-            self.data,
-            category_col="sentiment",
-            text_col="review",
-            nlp=st.whitespace_nlp_with_sentences,
-        ).build()
-
-        return self.corpus
-
-    def get_simple_stats(self) -> dict:
-        """Compute basic dataset statistics."""
-        stats = {}
-
-        # Class distribution
-        stats["class_distribution"] = self.data["sentiment"].value_counts().to_dict()
-
-        # Length statistics
-        stats["average_text_length"] = {
-            "overall": self.data["_char_len"].mean(),
-            "positive": self.data[self.data["sentiment"] == "positive"][
-                "_char_len"
-            ].mean(),
-            "negative": self.data[self.data["sentiment"] == "negative"][
-                "_char_len"
-            ].mean(),
-        }
-        stats["median_text_length"] = {
-            "overall": self.data["_char_len"].median(),
-            "positive": self.data[self.data["sentiment"] == "positive"][
-                "_char_len"
-            ].median(),
-            "negative": self.data[self.data["sentiment"] == "negative"][
-                "_char_len"
-            ].median(),
-        }
-        stats["average_word_count"] = {
-            "overall": self.data["_word_count"].mean(),
-            "positive": self.data[self.data["sentiment"] == "positive"][
-                "_word_count"
-            ].mean(),
-            "negative": self.data[self.data["sentiment"] == "negative"][
-                "_word_count"
-            ].mean(),
-        }
-        stats["median_word_count"] = {
-            "overall": self.data["_word_count"].median(),
-            "positive": self.data[self.data["sentiment"] == "positive"][
-                "_word_count"
-            ].median(),
-            "negative": self.data[self.data["sentiment"] == "negative"][
-                "_word_count"
-            ].median(),
-        }
-
-        # Vocabulary
-        counters = self._get_word_counters()
-        stats["vocabulary_size"] = {k: len(v) for k, v in counters.items()}
-        stats["most_frequent_words"] = {
-            k: v.most_common(10) for k, v in counters.items()
-        }
-        self.stats = stats
-        return stats
-
-    def get_full_stats(self) -> dict:
-        """Compute comprehensive dataset statistics."""
-        stats = self.get_simple_stats()
-        # N-grams
-        for n in [2, 3, 4]:
-            stats[f"{n}_gram_frequency"] = self._compute_ngram_stats(n)
-
-        # Log-odds ratio
-        stats["most_significant_words"] = self._compute_log_odds_ratio()
-
-        self.stats = stats
-        return stats
-
-    def _compute_ngram_stats(self, n: int) -> dict[str, list]:
-        """Compute n-gram frequencies per sentiment."""
-        result = {}
-
-        for sentiment in ["positive", "negative", "overall"]:
-            if sentiment == "overall":
-                tokens_series = self.data["_tokens"]
-            else:
-                mask = self.data["sentiment"] == sentiment
-                tokens_series = self.data.loc[mask, "_tokens"]
-
-            ngram_counter = Counter()
-            for tokens in tokens_series:
-                ngram_counter.update(nltk.ngrams(tokens, n))
-
-            result[sentiment] = ngram_counter.most_common(10)
-
-        return result
-
-    def _compute_log_odds_ratio(self, top_n: int = 10) -> dict[str, list]:
-        """Compute log-odds ratio scores using scattertext."""
-        from scattertext import LogOddsRatioUninformativeDirichletPrior
-
-        corpus = self._build_corpus()
-        term_freq_df = corpus.get_term_freq_df()
-
-        scorer = LogOddsRatioUninformativeDirichletPrior()
-        scores = scorer.get_scores(
-            term_freq_df["positive freq"], term_freq_df["negative freq"]
-        )
-
-        scores_series = pd.Series(scores, index=term_freq_df.index)
-
-        return {
-            "positive": scores_series.nlargest(top_n).index.tolist(),
-            "negative": scores_series.nsmallest(top_n).index.tolist(),
-        }
-
-    def visualize_word_clouds(self, save_path: Optional[str] = None):
-        """Generate word clouds per sentiment."""
-        from wordcloud import WordCloud, STOPWORDS
-        import matplotlib.pyplot as plt
-
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-        counters = self._get_word_counters()
-
-        for ax, sentiment in zip(axes, ["positive", "negative"]):
-            word_freq = {
-                w: c
-                for w, c in counters[sentiment].items()
-                if w not in STOPWORDS and len(w) > 2
-            }
-
-            wc = WordCloud(
-                width=800, height=400, background_color="white", max_words=100
-            ).generate_from_frequencies(word_freq)
-
-            ax.imshow(wc, interpolation="bilinear")
-            ax.axis("off")
-            ax.set_title(f"{sentiment.capitalize()} Reviews")
-
-        plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path, dpi=150)
-        plt.show()
-
-    def visualize_scattertext(self, output_html: str = "scattertext.html"):
-        """Generate interactive scattertext visualization."""
-        import scattertext as st
-
-        corpus = self._build_corpus()
-
-        html = st.produce_scattertext_explorer(
-            corpus,
-            category="positive",
-            category_name="Positive",
-            not_category_name="Negative",
-            minimum_term_frequency=50,
-            width_in_pixels=1000,
-            transform=st.Scalers.log_scale_standardize,
-        )
-
-        Path(output_html).write_text(html)
-        print(f"Saved to {output_html}")
-
-
 # ==================== Part 3: PyTorch Dataset/DataLoader ====================
+
 
 class IMDBDataset(Dataset):
     """
-    PyTorch-compatible dataset for IMDB reviews.
-    
-    Works with pre-tokenized sequences from the _tokens column.
-    Converts tokens to token IDs using a vocabulary mapping.
-    For next token prediction: returns input sequence and target sequence (shifted by 1).
+    Simple PyTorch-compatible dataset for IMDB reviews.
+    Stores raw tokens and labels; token-to-ID conversion happens in collate_fn.
     """
 
-    def __init__(
-        self,
-        tokens_list: list[list[str]],
-        labels: list[int],
-        vocab: dict[str, int],
-        start_token: Optional[str] = None,
-        end_token: Optional[str] = None,
-    ):
+    def __init__(self, tokens_list: list[list[str]], labels: list[int]):
         self.tokens_list = tokens_list
         self.labels = labels
-        self.vocab = vocab
-        self.start_token = start_token
-        self.end_token = end_token
-        self.unk_token = "<UNK>"
-        self.unk_id = vocab.get(self.unk_token, 1)
-        self.padding_idx = 0
 
     def __len__(self) -> int:
         return len(self.tokens_list)
 
     def __getitem__(self, idx: int) -> dict:
-        """
-        Get a single sample from the dataset.
-
-        Returns:
-            dict with:
-                - "token_ids": list[int] - token ID sequence (with optional start/end tokens)
-                - "label": int - sentiment label (0=negative, 1=positive)
-        """
-        tokens = self.tokens_list[idx].copy()
-
-        if self.start_token:
-            tokens = [self.start_token] + tokens
-        if self.end_token:
-            tokens = tokens + [self.end_token]
-
-        # Convert tokens to IDs
-        token_ids = [self.vocab.get(token, self.unk_id) for token in tokens]
-
         return {
-            "token_ids": token_ids,
+            "tokens": self.tokens_list[idx],
             "label": self.labels[idx],
         }
 
 
 def collate_fn_for_lm(
-    batch, padding_idx: int = 0, max_seq_length: Optional[int] = None
+    batch,
+    vocab: dict[str, int],
+    padding_idx: int = 0,
+    max_seq_length: Optional[int] = None,
+    start_token: Optional[str] = None,
+    end_token: Optional[str] = None,
 ):
-    token_ids_list = [item["token_ids"] for item in batch]
+    """
+    Collate function that converts tokens to IDs and creates input/target pairs.
+    """
+    unk_id = vocab.get("<UNK>", 1)
+
+    # Convert tokens to IDs with optional start/end tokens
+    token_ids_list = []
+    for item in batch:
+        tokens = item["tokens"]
+        if start_token:
+            tokens = [start_token] + tokens
+        if end_token:
+            tokens = tokens + [end_token]
+        token_ids = [vocab.get(t, unk_id) for t in tokens]
+        token_ids_list.append(token_ids)
+
     labels = [item["label"] for item in batch]
 
     # Truncate BUT preserve end token
@@ -492,13 +318,12 @@ def collate_fn_for_lm(
         truncated = []
         for seq in token_ids_list:
             if len(seq) > max_seq_length:
-                # Keep first (max_seq_length-1) tokens + last token (</s>)
                 truncated.append(seq[: max_seq_length - 1] + [seq[-1]])
             else:
                 truncated.append(seq)
         token_ids_list = truncated
 
-    # Build input/target pairs as lists first
+    # Build input/target pairs
     inputs = []
     targets = []
     for seq in token_ids_list:
@@ -509,9 +334,8 @@ def collate_fn_for_lm(
             inputs.append([padding_idx])
             targets.append([padding_idx])
 
-    # Pad all sequences at once (much faster)
+    # Pad all sequences
     max_len = max(len(s) for s in inputs)
-
     input_ids = torch.full((len(inputs), max_len), padding_idx, dtype=torch.long)
     target_ids = torch.full((len(targets), max_len), padding_idx, dtype=torch.long)
 
@@ -528,20 +352,19 @@ def collate_fn_for_lm(
 
 class IMDBDataModule:
     """
-    Creates PyTorch Dataset and DataLoader instances for IMDB data.
-    Supports vocabulary building and token-to-ID conversion for neural network training.
-    
+    Creates PyTorch DataLoader instances for IMDB data.
+    Handles vocabulary building and token-to-ID conversion.
+
     Usage:
         preprocessor = TextPreprocessor("dataset/imdb-dataset.csv")
         df = preprocessor.load_data(remove_stopwords=True)
         train_df, val_df, test_df = preprocessor.get_splits()
-        
+
         data_module = IMDBDataModule()
-        data_module.build_vocab(train_df["_tokens"].tolist())
-        train_dataset = data_module.get_torch_dataset(train_df, start_token="<s>", end_token="</s>")
-        train_loader = data_module.get_torch_dataloader(train_df, batch_size=32, shuffle=True)
+        data_module.build_vocab(train_df["_words"].tolist())
+        train_loader = data_module.get_dataloader(train_df, batch_size=32, shuffle=True)
     """
-    
+
     def __init__(self):
         self.vocab: Optional[dict[str, int]] = None
         self.padding_idx = 0
@@ -549,120 +372,90 @@ class IMDBDataModule:
     def build_vocab(self, tokens_list: list[list[str]], min_freq: int = 10):
         """
         Build vocabulary from token sequences.
-        
+
         Args:
             tokens_list: List of token sequences
             min_freq: Minimum frequency for a token to be included in vocabulary
         """
-        from collections import Counter
-        
-        # Count token frequencies
         token_counter = Counter()
         for tokens in tokens_list:
             token_counter.update(tokens)
-        
-        # Build vocabulary: special tokens first, then frequent tokens
-        self.vocab = {}
-        # Add padding token
-        self.vocab["<PAD>"] = 0
-        
-        # Add special tokens
-        special_tokens = ["<UNK>", "<s>", "</s>"]
-        for token in special_tokens:
-            if token not in self.vocab:
-                self.vocab[token] = len(self.vocab)
-        
-        # Add tokens that meet minimum frequency
+
+        self.vocab = {"<PAD>": 0, "<UNK>": 1, "<s>": 2, "</s>": 3}
+
         for token, freq in token_counter.items():
             if token not in self.vocab and freq >= min_freq:
                 self.vocab[token] = len(self.vocab)
-        
+
         print(f"Built vocabulary with {len(self.vocab)} tokens")
-    
+
     def decode_sequence(self, token_ids: list[int]) -> str:
-        """
-        Convert a list of token IDs back to a string using the vocabulary.
-        
-        Args:
-            token_ids: List of token IDs
-            
-        Returns:
-            Reconstructed string
-        """
+        """Convert token IDs back to string."""
         if self.vocab is None:
             raise ValueError("Vocabulary not built. Call build_vocab() first.")
-        
+
         id_to_token = {idx: token for token, idx in self.vocab.items()}
         tokens = [id_to_token.get(tid, "<UNK>") for tid in token_ids]
         return " ".join(tokens)
-    
 
-    def get_torch_dataset(
-        self,
-        df: pd.DataFrame,
-        start_token: Optional[str] = None,
-        end_token: Optional[str] = None,
-    ) -> IMDBDataset:
-        """
-        Create a PyTorch Dataset from a DataFrame.
-
-        Args:
-            df: DataFrame (e.g., from TextPreprocessor.get_splits())
-            start_token: optional token to prepend (e.g., '<s>')
-            end_token: optional token to append (e.g., '</s>')
-
-        Returns:
-            IMDBDataset instance (compatible with torch.utils.data.Dataset)
-        """
-        if self.vocab is None:
-            raise ValueError("Vocabulary not built. Call build_vocab() first.")
-        
-        return IMDBDataset(
-            tokens_list=df["_tokens"].tolist(),
-            labels=df["sentiment"].map(SENTIMENT_TO_ID).tolist(),
-            vocab=self.vocab,
-            start_token=start_token,
-            end_token=end_token,
-        )
-
-    def get_torch_dataloader(
+    def get_dataloader(
         self,
         df: pd.DataFrame,
         batch_size: int = 32,
         shuffle: bool = False,
-        start_token: Optional[str] = None,
-        end_token: Optional[str] = None,
+        start_token: Optional[str] = "<s>",
+        end_token: Optional[str] = "</s>",
         max_seq_length: Optional[int] = None,
         num_workers: int = 0,
+        device: Optional[str] = None,
     ) -> DataLoader:
         """
         Create a PyTorch DataLoader from a DataFrame.
 
         Args:
-            df: DataFrame (e.g., from TextPreprocessor.get_splits())
-            batch_size: batch size for DataLoader (use smaller values for memory efficiency)
-            shuffle: whether to shuffle the data
-            start_token: optional token to prepend (e.g., '<s>')
-            end_token: optional token to append (e.g., '</s>')
-            max_seq_length: maximum sequence length (truncates longer sequences to save memory)
-            num_workers: number of worker processes (0 = single process, safer for memory)
+            df: DataFrame with "_words" column from TextPreprocessor
+            batch_size: batch size
+            shuffle: whether to shuffle
+            start_token: token to prepend (default: "<s>")
+            end_token: token to append (default: "</s>")
+            max_seq_length: max sequence length (truncates longer sequences)
+            num_workers: number of worker processes
+            device: device string for pin_memory optimization
 
         Returns:
-            PyTorch DataLoader instance with collate function for next token prediction
+            PyTorch DataLoader
         """
-        dataset = self.get_torch_dataset(df, start_token, end_token)
-        collate_fn = functools.partial(
-            collate_fn_for_lm, 
-            padding_idx=self.padding_idx,
-            max_seq_length=max_seq_length
+        if self.vocab is None:
+            raise ValueError("Vocabulary not built. Call build_vocab() first.")
+
+        if "_words" not in df.columns:
+            raise ValueError(
+                "DataFrame must contain '_words' column. "
+                "Use TextPreprocessor with tokenizer_type='word' (default)."
+            )
+
+        dataset = IMDBDataset(
+            tokens_list=df["_words"].tolist(),
+            labels=df["sentiment"].map(SENTIMENT_TO_ID).tolist(),
         )
+
+        collate_fn = functools.partial(
+            collate_fn_for_lm,
+            vocab=self.vocab,
+            padding_idx=self.padding_idx,
+            max_seq_length=max_seq_length,
+            start_token=start_token,
+            end_token=end_token,
+        )
+
+        pin_memory = device == "cuda" if device else False
         return DataLoader(
-            dataset, 
-            batch_size=batch_size, 
-            shuffle=shuffle, 
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
             collate_fn=collate_fn,
             num_workers=num_workers,
-            pin_memory=False,  # Disable pin_memory to save RAM
+            pin_memory=pin_memory,
         )
 
 
@@ -677,27 +470,23 @@ if __name__ == "__main__":
 
     # Part 2: Statistics
     stats_computer = IMDBDataStats(df)
-    stats = stats_computer.get_stats()
+    stats = stats_computer.get_full_stats()
     pprint.pprint(stats)
 
-    # Part 3: PyTorch Dataset/DataLoader
+    # Part 3: PyTorch DataLoader
     train_df, val_df, test_df = preprocessor.get_splits()
 
-    # For neural network with PyTorch DataLoader
     data_module = IMDBDataModule()
-    data_module.build_vocab(train_df["_tokens"].tolist())
+    data_module.build_vocab(train_df["_words"].tolist())
 
-    # Create dataset and dataloader with pre-tokenized sequences
-    train_dataset = data_module.get_torch_dataset(train_df, start_token="<s>", end_token="</s>")
-    train_loader = data_module.get_torch_dataloader(train_df, batch_size=32, shuffle=True)
+    train_loader = data_module.get_dataloader(train_df, batch_size=32, shuffle=True)
+    val_loader = data_module.get_dataloader(val_df, batch_size=32)
 
     # Example: iterate through batches
-    print(f"Dataset length: {len(train_dataset)}")
-    print(f"First sample token_ids length: {len(train_dataset[0]['token_ids'])}")
-    print(f"\nIterating through first batch:")
+    print(f"\nDataLoader length: {len(train_loader)} batches")
     for batch in train_loader:
         print(f"Batch keys: {batch.keys()}")
         print(f"Input IDs shape: {batch['input_ids'].shape}")
         print(f"Target IDs shape: {batch['target_ids'].shape}")
         print(f"Labels shape: {batch['label'].shape}")
-        break  # Just show first batch
+        break
