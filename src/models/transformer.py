@@ -14,11 +14,11 @@ def get_device():
     else:
         return "cpu"
 
-# TextPreprocessor already has the tokenized text. So the tokenizer param should be passed to that.
-# Dataset class can be completely unaware of the tokenization
+
+# ==================== Transformer Dataset ====================
 
 
-class SentimentDataset:
+class TransformerDataset:
     def __init__(self, input_ids, attention_mask, labels):
         # Store as lists for dynamic padding (much faster than padding all to max_length)
         self.input_ids = input_ids
@@ -41,7 +41,7 @@ class SentimentDataset:
         return len(self.labels)
 
 
-def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, output_dir="./minilm_imdb_model", tokenization="unigram"):
+def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, output_dir="out/minilm_imdb_model", tokenization="unigram", epochs=3, batch_size=32):
     """Finetune miniLM on IMDB dataset for sentiment classification."""
 
     # Detect device
@@ -83,12 +83,12 @@ def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, outp
         train_df, val_df, test_df = preprocessor.get_splits()
 
         # Create datasets with already encoded data
-        train_dataset = SentimentDataset(
+        train_dataset = TransformerDataset(
             train_df["_input_ids"].tolist(),
             train_df["_attention_mask"].tolist(),
             train_df["sentiment"].map(SENTIMENT_TO_ID).tolist()
         )
-        val_dataset = SentimentDataset(
+        val_dataset = TransformerDataset(
             val_df["_input_ids"].tolist(),
             val_df["_attention_mask"].tolist(),
             val_df["sentiment"].map(SENTIMENT_TO_ID).tolist()
@@ -110,8 +110,8 @@ def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, outp
             output_dir=(
                 f"{output_dir}_{tok_type}" if tokenization == "all" else output_dir
             ),
-            num_train_epochs=3,
-            per_device_train_batch_size=32,  # Increased from 16 (dynamic padding allows larger batches)
+            num_train_epochs=epochs,
+            per_device_train_batch_size=batch_size,  # Increased from 16 (dynamic padding allows larger batches)
             per_device_eval_batch_size=64,  # Even larger for eval (no gradients)
             fp16=use_fp16,  # Enable for CUDA with bf16 not available
             bf16=use_bf16,  # Enable bf16 on CUDA if supported (better than fp16)
@@ -142,7 +142,7 @@ def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, outp
         tokenizer.save_pretrained(f"{output_dir}_{tok_type}" if tokenization == "all" else output_dir)
 
         # Evaluate on test set
-        test_dataset = SentimentDataset(
+        test_dataset = TransformerDataset(
             test_df["_input_ids"].tolist(),
             test_df["_attention_mask"].tolist(),
             test_df["sentiment"].map(SENTIMENT_TO_ID).tolist()
