@@ -180,9 +180,9 @@ def evaluate_transformer(
         print("  4. Save the file and re-run this script to see agreement analysis")
         print("\nNote: Gold labels are provided for reference, but rate based on your judgment!")
 
-        # copy existing gold labels to human_rating column as placeholder
-        eval_df["human_rating"] = eval_df["gold_label"].map({0: "negative", 1: "positive"})
-        eval_df.to_csv(output_csv, index=False)
+        # REMOVE THIS FOR HAND LABELS: copy existing gold labels to human_rating column as placeholder
+        #eval_df["human_rating"] = eval_df["gold_label"].map({0: "negative", 1: "positive"})
+        # eval_df.to_csv(output_csv, index=False)
     else:
         print(f"\n{'='*60}")
         print("PART 3: HUMAN EVALUATION (Skipped)")
@@ -192,7 +192,7 @@ def evaluate_transformer(
     # ==================== PART 4: LLM-as-a-Judge Evaluation ====================
     if not skip_llm_judge:
         print(f"\n{'='*60}")
-        print("PART 4: LLM-AS-A-JUDGE EVALUATION (Llama 3.2 3B)")
+        print("PART 4: LLM-AS-A-JUDGE EVALUATION")
         print(f"{'='*60}")
 
         try:

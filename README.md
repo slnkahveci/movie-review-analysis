@@ -4,15 +4,29 @@ Multi-model sentiment analysis project with N-grams, RNNs, and Transformers.
 
 
 ## Project Structure
-
 ```
 src/
-  ├── models/       # Model implementations (ngram, nn, transformer)
-  ├── data/         # Data processing (dataloader, stats)
-  └── eval/         # Evaluation scripts (metrics, LLM judge)
-out/                # (ignored) All outputs (models, plots, results) 
-dataset/            # (ignored) IMDB dataset
-interface.ipynb     # Unified Jupyter interface
+  ├── models/
+  │   ├── ngram.py                              # N-gram language models (bigram/trigram) with Laplace smoothing
+  │   ├── nn.py                                 # LSTM/GRU implementations with dataset classes
+  │   └── transformer.py                        # ALBERT fine-tuning for sentiment classification
+  ├── data/
+  │   ├── dataloader.py                         # IMDB dataset loading and preprocessing
+  │   └── stats.py                              # Dataset statistics and visualizations
+  └── eval/
+      ├── metrics.py                            # Evaluation metrics (accuracy, F1, perplexity)
+      ├── llm_judge.py                          # LLM-as-a-Judge evaluation implementation
+      └── eval_transformer.py                   # Main evaluation pipeline script
+out/                                            # (ignored) All outputs (models, plots, results)
+  ├── wordclouds.png                            # Word cloud visualizations for positive/negative reviews
+  ├── scattertext.html                          # Interactive term frequency visualization
+  ├── minilm_imdb_model/                        # Fine-tuned transformer model directory
+  └── evaluation_results.csv                    # Evaluation results for manual annotation
+dataset/                                        # (ignored) IMDB dataset
+  ├── imdb-dataset.csv                          # Original IMDB dataset
+  └── imdb-test-subsample-100_{SAMPLE_SIZE}.csv # Random 100 test samples for evaluation
+interface.ipynb                                 # Unified Jupyter interface for training and evaluation
+requirements.txt
 ```
 
 ## Models

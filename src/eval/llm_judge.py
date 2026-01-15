@@ -172,7 +172,7 @@ def evaluate_with_llm_judge(df: pd.DataFrame, api_key: str = None, model_type: s
     Args:
         df: DataFrame with 'review' column
         api_key: API key (OpenRouter API key for OpenRouter, Google API key for Gemini)
-        model_type: Which model to use - "openrouter" (Llama 3.2 3B) or "gemini" (Gemini 3 Flash Preview)
+        model_type: Which model to use - "openrouter" (Llama 3.2 3B) or "gemini" (Gemini 2.5 Flash)
 
     Returns:
         DataFrame with added 'llm_judge' column
@@ -180,7 +180,7 @@ def evaluate_with_llm_judge(df: pd.DataFrame, api_key: str = None, model_type: s
     if model_type not in ["openrouter", "gemini"]:
         raise ValueError(f"model_type must be 'openrouter' or 'gemini', got '{model_type}'")
     
-    model_name = "Llama 3.2 3B via OpenRouter" if model_type == "openrouter" else "Gemini 3 Flash Preview"
+    model_name = "Llama 3.2 3B via OpenRouter" if model_type == "openrouter" else "Gemini 2.5 Flash"
     
     print(f"\n{'='*50}")
     print(f"LLM JUDGE EVALUATION ({model_name})")
