@@ -168,57 +168,19 @@ class TextPreprocessor:
 
     def get_splits(
         self,
-        train_ratio: float = 0.8,
-        val_ratio: float = 0.1,
-        test_ratio: float = 0.1,
-        stratify: bool = True,
+        train_index: list[int],
+        val_index: list[int],
+        test_index: list[int],
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """
-        Split data into train/val/test sets.
-
-        Returns:
-            (train_df, val_df, test_df)
-        """
+        """Split data into train, validation, and test sets based on provided indices."""
         if self.data is None:
-            raise ValueError("Data not loaded. Call load_data() first.")
-
-        assert (
-            abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
-        ), "Ratios must sum to 1"
-
-        from sklearn.model_selection import train_test_split
-
-        stratify_col = self.data["sentiment"] if stratify else None
-
-        # First split: train vs (val + test)
-        train_df, temp_df = train_test_split(
-            self.data,
-            train_size=train_ratio,
-            stratify=stratify_col,
-            random_state=self.random_state,
-        )
-
-        # Second split: val vs test
-        val_size = val_ratio / (val_ratio + test_ratio)
-        stratify_col = temp_df["sentiment"] if stratify else None
-
-        val_df, test_df = train_test_split(
-            temp_df,
-            train_size=val_size,
-            stratify=stratify_col,
-            random_state=self.random_state,
-        )
-
-        print(
-            f"Split sizes - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}"
-        )
-
-        # reset indices and don't save old indices
-        return (
-            train_df.reset_index(drop=True),
-            val_df.reset_index(drop=True),
-            test_df.reset_index(drop=True),
-        )
+            raise ValueError("No data loaded. Call load_data() first.")
+        
+        train_df = self.data.iloc[train_index].reset_index(drop=True)
+        val_df = self.data.iloc[val_index].reset_index(drop=True)
+        test_df = self.data.iloc[test_index].reset_index(drop=True)
+        
+        return train_df, val_df, test_df
 
     def save(self, path: str):
         """Save processed data to disk."""

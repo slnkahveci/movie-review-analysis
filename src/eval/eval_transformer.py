@@ -5,7 +5,7 @@ import random
 import torch
 import pandas as pd
 from src.models.transformer import get_device, TransformerDataset
-from src.data.dataloader import TextPreprocessor, SENTIMENT_TO_ID
+from src.data.preprocessing import TextPreprocessor, SENTIMENT_TO_ID
 from src.eval.metrics import compute_metrics, print_metrics, create_evaluation_dataframe
 from src.eval.llm_judge import evaluate_with_llm_judge, analyze_agreement
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
@@ -23,8 +23,12 @@ def load_model(model_dir: str, device: str):
 def evaluate_transformer(
     model_dir: str = "out/minilm_imdb_model",
     data_path: str = "dataset/imdb-dataset.csv",
+    test_path: str = None,
+    train_index: list[int] = None,
+    eval_index: list[int] = None,
+    test_index: list[int] = None,
+    tokenizer_type: str = None,
     sample_size: int = 1000,
-    test_subsample: int = 100,
     output_csv: str = "out/evaluation_results.csv",
     skip_llm_judge: bool = False,
     skip_human_eval: bool = False,
@@ -40,7 +44,9 @@ def evaluate_transformer(
         model_dir: Path to saved model
         data_path: Path to dataset
         sample_size: Total dataset size
-        test_subsample: Number of test instances to randomly subsample for evaluation
+        train_index: List of training set indices
+        eval_index: List of evaluation set indices
+        test_index: List of test set indices
         output_csv: Output CSV file for human annotation
         skip_llm_judge: Skip LLM judge evaluation (useful if API key not available)
         skip_human_eval: Skip human evaluation CSV generation
@@ -52,17 +58,18 @@ def evaluate_transformer(
     # Load model
     print("\nLoading model...")
     model, tokenizer = load_model(model_dir, device)
+    print(f"Transformer vocabulary size: {len(tokenizer)}")
 
     # Load data
     print("\nLoading data...")
     preprocessor = TextPreprocessor(
         data_path,
         sample_size=sample_size,
-        tokenizer_type="unigram",
+        tokenizer_type=tokenizer_type,
         tokenizer=tokenizer,
     )
     df = preprocessor.load_data(remove_stopwords=False, max_length=320)
-    train_df, val_df, test_df = preprocessor.get_splits()
+    train_df, val_df, test_df = preprocessor.get_splits(train_index=train_index, val_index=eval_index, test_index=test_index)
 
     # Create datasets
     train_dataset = TransformerDataset(
@@ -99,15 +106,16 @@ def evaluate_transformer(
     print_metrics(val_metrics, "Validation")
     print_metrics(test_metrics, "Test")
 
-    # ==================== PART 2: Subsample 100 Test Instances ====================
+    # ==================== PART 2: Use selected 100 Test Instances ====================
     print(f"\n{'='*60}")
-    print(f"PART 2: RANDOM SUBSAMPLE ({test_subsample} Test Instances)")
+    print(f"PART 2: SUBSAMPLE (100 Test Instances)")
     print(f"{'='*60}")
 
     # Random subsample from test set
     random.seed(42)
-    test_indices = random.sample(range(len(test_df)), min(test_subsample, len(test_df)))
-    test_subsample_df = test_df.iloc[test_indices].reset_index(drop=True)
+    # read test_path if provided
+    if test_path:
+        test_subsample_df =pd.read_csv(test_path)
 
     # Get model predictions for subsample
     subsample_reviews = []
@@ -171,6 +179,10 @@ def evaluate_transformer(
         print("  3. You and your teammates should rate each review independently")
         print("  4. Save the file and re-run this script to see agreement analysis")
         print("\nNote: Gold labels are provided for reference, but rate based on your judgment!")
+
+        # copy existing gold labels to human_rating column as placeholder
+        eval_df["human_rating"] = eval_df["gold_label"].map({0: "negative", 1: "positive"})
+        eval_df.to_csv(output_csv, index=False)
     else:
         print(f"\n{'='*60}")
         print("PART 3: HUMAN EVALUATION (Skipped)")

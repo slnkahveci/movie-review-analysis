@@ -16,7 +16,7 @@ import math
 from tqdm import tqdm
 from time import time
 
-from src.data.dataloader import TextPreprocessor
+from src.data.preprocessing import TextPreprocessor
 
 
 class NGramModel:

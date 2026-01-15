@@ -1,6 +1,7 @@
 # finetune minilm on imdb set
 
-from src.data.dataloader import TextPreprocessor, SENTIMENT_TO_ID
+from sklearn import base
+from src.data.preprocessing import TextPreprocessor, SENTIMENT_TO_ID
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, DataCollatorWithPadding
 import torch
 
@@ -41,7 +42,7 @@ class TransformerDataset:
         return len(self.labels)
 
 
-def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, output_dir="out/minilm_imdb_model", tokenization="unigram", epochs=3, batch_size=32):
+def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, output_dir="out/minilm_imdb_model", tokenization="unigram", epochs=3, batch_size=32, train_index=None, val_index=None, test_index=None):
     """Finetune miniLM on IMDB dataset for sentiment classification."""
 
     # Detect device
@@ -50,17 +51,20 @@ def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, outp
 
     # Model configurations
     models = {
-        "wordpiece": "microsoft/MiniLM-L12-H384-uncased",
-        "bpe": "distilroberta-base", # 82 M not ideal for laptop
-        "unigram": "albert-base-v2"
+        "wordpiece": "microsoft/MiniLM-L12-H384-uncased", # 33 M
+        #"wordpiece": "distilbert-base-uncased",  # 67 M
+        #"bpe": "distilroberta-base",  # 82.1 M not ideal for laptop
+        "unigram": "albert-base-v2",  # 11 M
     }
 
-    tokenizations = ["wordpiece", "bpe", "unigram"] if tokenization == "all" else [tokenization]
+
+    tokenizations = ["wordpiece", "unigram"] if tokenization == "all" else [tokenization]
     outputs = {}
 
     for tok_type in tokenizations:
         model_name = models[tok_type]
         tokenizer = AutoTokenizer.from_pretrained(model_name)
+        print(f"\nVocabulary size for {tok_type} tokenizer: {len(tokenizer)}")
         model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2)
 
         # Enable gradient checkpointing for memory efficiency (allows larger batches)
@@ -80,7 +84,8 @@ def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, outp
 
         preprocessor = TextPreprocessor(data_path, sample_size=sample_size, tokenizer_type=tok_type, tokenizer=tokenizer)
         df = preprocessor.load_data(remove_stopwords=False, max_length=320)
-        train_df, val_df, test_df = preprocessor.get_splits()
+        train_df, val_df, test_df = preprocessor.get_splits(train_index=train_index, val_index=val_index, test_index=test_index)
+        
 
         # Create datasets with already encoded data
         train_dataset = TransformerDataset(
@@ -160,7 +165,6 @@ def finetune_minilm(data_path="dataset/imdb-dataset.csv", sample_size=1000, outp
 
     # Return a dict for all runs (single entry when tokenization != "all")
     return outputs
-
 
 if __name__ == "__main__":
     finetune_minilm()

@@ -15,7 +15,7 @@ import pandas as pd
 from collections import Counter
 from typing import Optional
 
-from src.data.dataloader import TextPreprocessor, SENTIMENT_TO_ID
+from src.data.preprocessing import TextPreprocessor, SENTIMENT_TO_ID
 
 # Special token IDs
 padding_idx = 0
